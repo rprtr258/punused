@@ -52,7 +52,7 @@ type DocumentSymbol struct {
 }
 
 // InitializedParams missing in github.com/sourcegraph/go-lsp borrowed from https://github.com/golang/tools/tree/master/gopls
-// TODO(bep) consolidate with lsp/lsp.go
+// TODO(rprtr258) consolidate with lsp/lsp.go
 type InitializedParams struct{}
 
 type SymbolTag float64

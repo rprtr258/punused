@@ -17,7 +17,7 @@ import (
 
 const (
 	configFilename  = ".punused.yaml"
-	_defaultTimeout = 2 * time.Minute
+	_defaultTimeout = 10 * time.Minute
 )
 
 type Config struct {
@@ -103,23 +103,18 @@ func run() error {
 		return err
 	}
 
-	if err := lib.Run(
-		ctx,
-		lib.RunConfig{
-			WorkspaceDir:    workdir,
-			FilenamePattern: patternGlob,
-			ExcludedPaths:   config.ExcludedPaths,
-			ExcludedSymbols: config.ExcludedSymbols,
-		},
-	); err != nil {
-		return err
-	}
-
-	return nil
+	return lib.Run(ctx, lib.RunConfig{
+		WorkspaceDir:    workdir,
+		FilenamePattern: patternGlob,
+		ExcludedPaths:   config.ExcludedPaths,
+		ExcludedSymbols: config.ExcludedSymbols,
+	})
 }
 
 func main() {
+	log.SetFlags(log.Lshortfile)
 	if err := run(); err != nil {
-		log.Fatal(err)
+		fmt.Fprintln(os.Stderr, err.Error())
+		os.Exit(1)
 	}
 }

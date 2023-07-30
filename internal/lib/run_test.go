@@ -26,13 +26,17 @@ func TestRun(t *testing.T) {
 		assert.NoError(t, r.Stop())
 	}()
 
-	diagnostics, err := r.Walk(ctx)
-	assert.NoError(t, err)
+	var errWalk error
+	diagnosticStrs := []string{}
+	r.Walk(ctx)(func(d Diagnostic, err error) {
+		if err != nil {
+			errWalk = err
+			return
+		}
 
-	diagnosticStrs := make([]string, len(diagnostics))
-	for i, diagnostic := range diagnostics {
-		diagnosticStrs[i] = diagnostic.String()
-	}
+		diagnosticStrs = append(diagnosticStrs, d.String())
+	})
+	assert.NoError(t, errWalk)
 
 	assert.Equal(t, diagnosticStrs, []string{
 		"internal/lib/testpackages/firstpackage/code1.go:7:2 variable UnusedVar is unused",
@@ -48,7 +52,6 @@ func TestRun(t *testing.T) {
 		"internal/lib/testpackages/firstpackage/code1.go:45:6 interface UsedInterface is unused",
 		"internal/lib/testpackages/firstpackage/testlib1.go:4:2 constant OnlyUsedInTestConst is used in test only",
 	})
-
 }
 
 func TestGlob(t *testing.T) {

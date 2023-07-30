@@ -22,7 +22,7 @@ var requestID uint64 = 5000
 func newClient(ctx context.Context, workspaceDir string) (*GoplsClient, error) {
 	workspaceDir = path.Clean(filepath.ToSlash(workspaceDir))
 
-	args := []string{"serve"} //, "-rpc.trace", "-logfile=/Users/bep/dev/gopls.log"}
+	args := []string{"serve"} // , "-rpc.trace", "-logfile=/Users/rprtr258/dev/gopls.log"}
 	cmd := exec.Command("gopls", args...)
 	cmd.Stderr = os.Stderr
 	conn, err := newConn(cmd)
@@ -43,7 +43,7 @@ func newClient(ctx context.Context, workspaceDir string) (*GoplsClient, error) {
 				DocumentSymbol: struct {
 					SymbolKind struct {
 						ValueSet []int `json:"valueSet,omitempty"`
-					} `json:"symbolKind,omitEmpty"` // nolint:staticcheck
+					} `json:"symbolKind,omitEmpty"`
 
 					HierarchicalDocumentSymbolSupport bool `json:"hierarchicalDocumentSymbolSupport,omitempty"`
 				}{
@@ -295,10 +295,11 @@ func (c *GoplsClient) Write(r request) error {
 	if err != nil {
 		return err
 	}
-	_, err = c.conn.Write([]byte(fmt.Sprintf("Content-Length: %d\r\n\r\n", len(b))))
-	if err != nil {
+
+	if _, err = fmt.Fprintf(c.conn, "Content-Length: %d\r\n\r\n", len(b)); err != nil {
 		return err
 	}
+
 	_, err = c.conn.Write(b)
 	return err
 }

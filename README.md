@@ -1,4 +1,4 @@
-[![Go](https://github.com/bep/punused/actions/workflows/go.yml/badge.svg)](https://github.com/bep/punused/actions/workflows/go.yml)
+[![Go](https://github.com/rprtr258/punused/actions/workflows/go.yml/badge.svg)](https://github.com/rprtr258/punused/actions/workflows/go.yml)
 
 This is a small utility that finds _unused exported Go symbols_ (functions, methods ...) in Go. For all other similar use cases, use https://github.com/dominikh/go-tools
 
@@ -8,7 +8,7 @@ There are some caveats:
 * It does not detect references via `reflect`.
 * Some possible surprises when it comes to interfaces.
 
-Differences from [original](https://github.com/bep/punused):
+Differences from [original](https://github.com/rprtr258/punused):
 - Default pattern is `**.go` which scans all go files in workspace.
 - Configurable using [config](#config) file.
 - Exits with non-zero code if found at least one unused symbol. So the linter is usable in CI pipelines.

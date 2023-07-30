@@ -71,16 +71,23 @@ func Run(ctx context.Context, cfg RunConfig) error {
 		}
 	}()
 
-	diagnostics, err := r.Walk(ctx)
-	if err != nil {
+	var errWalk error
+	count := 0
+	r.Walk(ctx)(func(d Diagnostic, err error) {
+		if err != nil {
+			errWalk = err
+			return
+		}
+
+		fmt.Println(d.String())
+		count++
+	})
+	if errWalk != nil {
 		return err
 	}
 
-	if len(diagnostics) > 0 {
-		for _, diagnostic := range diagnostics {
-			fmt.Println(diagnostic.String())
-		}
-		os.Exit(1)
+	if count > 0 {
+		return fmt.Errorf("found %d unused symbols", count)
 	}
 
 	return nil
@@ -123,45 +130,47 @@ func (r *runner) isFileExcluded(filename string) bool {
 	return false
 }
 
-func (r *runner) Walk(ctx context.Context) ([]Diagnostic, error) {
-	res := []Diagnostic{}
-	if err := filepath.Walk(r.cfg.WorkspaceDir, func(path string, info fs.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-
-		if info == nil {
-			return nil
-		}
-		if info.IsDir() {
-			if strings.HasPrefix(info.Name(), ".") {
-				return filepath.SkipDir
+func (r *runner) Walk(ctx context.Context) func(func(Diagnostic, error)) {
+	return func(yield func(Diagnostic, error)) {
+		if err := filepath.Walk(r.cfg.WorkspaceDir, func(path string, info fs.FileInfo, err error) error {
+			if err != nil {
+				return err
 			}
+
+			if info == nil {
+				return nil
+			}
+			if info.IsDir() {
+				if strings.HasPrefix(info.Name(), ".") {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+
+			if !strings.HasSuffix(path, ".go") {
+				return nil
+			}
+
+			base := strings.TrimPrefix(filepath.ToSlash(strings.TrimPrefix(path, r.cfg.WorkspaceDir)), "/")
+
+			if r.isFileExcluded(base) {
+				return nil
+			}
+
+			diagnostics, err := r.handleFile(ctx, base)
+			if err != nil {
+				return err
+			}
+
+			for _, diagnostic := range diagnostics {
+				yield(diagnostic, nil)
+			}
+
 			return nil
+		}); err != nil {
+			yield(Diagnostic{}, err)
 		}
-
-		if !strings.HasSuffix(path, ".go") {
-			return nil
-		}
-
-		base := strings.TrimPrefix(filepath.ToSlash(strings.TrimPrefix(path, r.cfg.WorkspaceDir)), "/")
-
-		if r.isFileExcluded(base) {
-			return nil
-		}
-
-		diagnostics, err := r.handleFile(ctx, base)
-		if err != nil {
-			return err
-		}
-
-		res = append(res, diagnostics...)
-		return nil
-	}); err != nil {
-		return nil, err
 	}
-
-	return res, nil
 }
 
 func (r *runner) isSymbolExcluded(symbol *Symbol) bool {
@@ -171,7 +180,7 @@ func (r *runner) isSymbolExcluded(symbol *Symbol) bool {
 		base = symbol.Name[strings.Index(symbol.Name, ".")+1:]
 	}
 
-	if len(base) == 0 || !unicode.IsUpper(rune(base[0])) {
+	if base == "" || !unicode.IsUpper(rune(base[0])) {
 		// not exported
 		return true
 	}
