@@ -10,6 +10,7 @@ import (
 	"strings"
 	"unicode"
 
+	"github.com/charlievieth/fastwalk"
 	"github.com/gobwas/glob"
 	lsp "github.com/sourcegraph/go-lsp"
 )
@@ -132,7 +133,7 @@ func (r *runner) isFileExcluded(filename string) bool {
 
 func (r *runner) Walk(ctx context.Context) func(func(Diagnostic, error)) {
 	return func(yield func(Diagnostic, error)) {
-		if err := filepath.Walk(r.cfg.WorkspaceDir, func(path string, info fs.FileInfo, err error) error {
+		if err := fastwalk.Walk(&fastwalk.Config{}, r.cfg.WorkspaceDir, func(path string, info fs.DirEntry, err error) error {
 			if err != nil {
 				return err
 			}

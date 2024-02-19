@@ -3,6 +3,7 @@ module github.com/rprtr258/punused
 go 1.18
 
 require (
+	github.com/charlievieth/fastwalk v1.0.2
 	github.com/gobwas/glob v0.2.3
 	github.com/sourcegraph/go-lsp v0.0.0-20200429204803-219e11d77f5d
 	github.com/stretchr/testify v1.8.2
