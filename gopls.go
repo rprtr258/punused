@@ -21,7 +21,7 @@ var requestID uint64 = 5000
 func newClient(ctx context.Context, workspaceDir string) (*GoplsClient, error) {
 	workspaceDir = filepath.Clean(filepath.ToSlash(workspaceDir))
 
-	args := []string{"serve"} //, "-rpc.trace", "-logfile=/Users/bep/dev/gopls.log"}
+	args := []string{"serve"} //, "-rpc.trace", "-logfile=/Users/rprtr258/dev/gopls.log"}
 	cmd := exec.Command("gopls", args...)
 	cmd.Stderr = os.Stderr
 	conn, err := newConn(cmd)

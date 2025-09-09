@@ -1,116 +1,34 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"io/fs"
-	"log"
-	"os"
+	"iter"
 	"path/filepath"
+	"slices"
 	"strings"
-	"unicode"
 
-	"github.com/charlievieth/fastwalk"
 	"github.com/gobwas/glob"
+	"github.com/rprtr258/scuf"
 	lsp "github.com/sourcegraph/go-lsp"
 )
 
-type Diagnostic struct {
-	Filename   string
+type diagnostic struct {
 	Symbol     Symbol
 	IsTestOnly bool
 }
 
-func (d Diagnostic) String() string {
-	symbol := d.Symbol
-	kind := strings.ToLower(symbol.Kind.String())
-	line := symbol.Location.Range.Start.Line + 1
-	col := symbol.Location.Range.Start.Character + 1
-	if d.IsTestOnly {
-		return fmt.Sprintf(
-			"%s:%d:%d %s %s is used in test only",
-			d.Filename, line, col, kind, symbol.Name)
-	} else {
-		return fmt.Sprintf(
-			"%s:%d:%d %s %s is unused",
-			d.Filename, line, col, kind, symbol.Name)
-	}
-}
-
 type RunConfig struct {
 	WorkspaceDir    string
-	FilenamePattern glob.Glob
+	FilenameMatcher glob.Glob
 	ExcludedPaths   []glob.Glob
 	ExcludedSymbols []string
-}
-
-func (cfg RunConfig) validate() error {
-	if cfg.WorkspaceDir == "" {
-		return fmt.Errorf("WorkspaceDir is required")
-	}
-
-	return nil
-}
-
-func Run(ctx context.Context, cfg RunConfig) error {
-	if err := cfg.validate(); err != nil {
-		return err
-	}
-
-	// This needs to be run from the rooot of a Go Module to get correct results.
-	if _, err := os.Stat(filepath.Join(cfg.WorkspaceDir, "go.mod")); err != nil {
-		return fmt.Errorf("workspace %s is not a Go module (go.mod is missing): %w", cfg.WorkspaceDir, err)
-	}
-
-	r, err := newRunner(ctx, cfg)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		if err := r.Stop(); err != nil {
-			log.Println(err.Error())
-		}
-	}()
-
-	var errWalk error
-	count := 0
-	r.Walk(ctx)(func(d Diagnostic, err error) {
-		if err != nil {
-			errWalk = err
-			return
-		}
-
-		fmt.Println(d.String())
-		count++
-	})
-	if errWalk != nil {
-		return err
-	}
-
-	if count > 0 {
-		return fmt.Errorf("found %d unused symbols", count)
-	}
-
-	return nil
-}
-
-func newRunner(ctx context.Context, cfg RunConfig) (*runner, error) {
-	client, err := newClient(ctx, cfg.WorkspaceDir)
-	if err != nil {
-		return nil, err
-	}
-
-	return &runner{
-		client:      client,
-		cfg:         cfg,
-		filematcher: cfg.FilenamePattern,
-	}, nil
+	SkipTests       bool
 }
 
 type runner struct {
-	cfg         RunConfig
-	filematcher glob.Glob
-	client      *GoplsClient
+	cfg    RunConfig
+	client *GoplsClient
 }
 
 func (r *runner) Stop() error {
@@ -118,7 +36,11 @@ func (r *runner) Stop() error {
 }
 
 func (r *runner) isFileExcluded(filename string) bool {
-	if !r.filematcher.Match(filename) {
+	if r.cfg.SkipTests && strings.HasSuffix(filename, "_test.go") {
+		return false
+	}
+
+	if !r.cfg.FilenameMatcher.Match(filename) {
 		return true
 	}
 
@@ -131,131 +53,153 @@ func (r *runner) isFileExcluded(filename string) bool {
 	return false
 }
 
-func (r *runner) Walk(ctx context.Context) func(func(Diagnostic, error)) {
-	return func(yield func(Diagnostic, error)) {
-		if err := fastwalk.Walk(&fastwalk.Config{}, r.cfg.WorkspaceDir, func(path string, info fs.DirEntry, err error) error {
-			if err != nil {
-				return err
-			}
+func (r *runner) handleSymbol(filename string, s Symbol, yield func(Symbol, error) bool) bool {
+	if !yield(s, nil) {
+		return false
+	}
 
-			if info == nil {
-				return nil
-			}
-			if info.IsDir() {
-				if strings.HasPrefix(info.Name(), ".") {
-					return filepath.SkipDir
-				}
-				return nil
-			}
-
-			if !strings.HasSuffix(path, ".go") {
-				return nil
-			}
-
-			filename := strings.TrimPrefix(filepath.ToSlash(strings.TrimPrefix(path, r.cfg.WorkspaceDir)), "/")
-			if r.isFileExcluded(filename) {
-				return nil
-			}
-
-			diagnostics, err := r.handleFile(filename)
-			if err != nil {
-				return err
-			}
-
-			for _, diagnostic := range diagnostics {
-				yield(diagnostic, nil)
-			}
-
-			return nil
-		}); err != nil {
-			yield(Diagnostic{}, err)
+	for _, child := range s.Children {
+		if !r.handleSymbol(filename, child, yield) {
+			return false
 		}
 	}
+
+	return true
 }
+
+func colorKind(kind lsp.SymbolKind) string {
+	switch kind {
+	case lsp.SKVariable, lsp.SKConstant, lsp.SKField:
+		return scuf.String(kind.String(), scuf.FgHiGreen)
+	case lsp.SKFunction, lsp.SKMethod:
+		return scuf.String(kind.String(), scuf.FgHiBlue)
+	case lsp.SKInterface, lsp.SKStruct, lsp.SKClass:
+		return scuf.String(kind.String(), scuf.FgHiMagenta)
+	default:
+		return kind.String()
+	}
+}
+
+func (r *runner) Walk(yield func(string, error) bool) {
+	if err := filepath.Walk(r.cfg.WorkspaceDir, func(path string, info fs.FileInfo, err error) error {
+		if info == nil {
+			return nil
+		}
+		if info.IsDir() {
+			if strings.HasPrefix(info.Name(), ".") {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+
+		if filepath.Ext(path) != ".go" {
+			return nil
+		}
+
+		filename := strings.TrimPrefix(filepath.ToSlash(strings.TrimPrefix(path, r.cfg.WorkspaceDir)), "/")
+		if r.isFileExcluded(filename) {
+			return nil
+		}
+
+		if !yield(filename, nil) {
+			return filepath.SkipAll
+		}
+
+		return nil
+	}); err != nil {
+		_ = yield("", err)
+	}
+}
+
+const debug = false
 
 func (r *runner) isSymbolExcluded(symbol Symbol) bool {
-	base := symbol.Name
-	if symbol.Kind == lsp.SKMethod && strings.Contains(base, ".") {
-		// Struct methods' Name comes on the form (MyType).MyMethod
-		base = symbol.Name[strings.Index(symbol.Name, ".")+1:]
-	}
-
-	if base == "" || !unicode.IsUpper(rune(base[0])) {
-		// not exported
-		return true
-	}
-
-	for _, excludedSymbol := range r.cfg.ExcludedSymbols {
-		if symbol.Name == excludedSymbol {
-			return true
-		}
-	}
-
-	return false
+	return symbol.Kind == lsp.SKFunction && (symbol.Name == "init" || symbol.Name == "main")
 }
 
-func (r *runner) handleSymbol(filename string, symbol Symbol) ([]Diagnostic, error) {
-	if r.isSymbolExcluded(symbol) {
-		return nil, nil
-	}
+func (r *runner) symbols(filenames iter.Seq2[string, error]) iter.Seq2[Symbol, error] {
+	return func(yield func(Symbol, error) bool) {
+		for filename, err := range filenames {
+			if err != nil {
+				_ = yield(Symbol{}, err)
+				return
+			}
 
-	refs, err := r.client.DocumentReferences(symbol.Location)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get references: %w", err)
-	}
+			symbols, err := r.client.DocumentSymbol(filename)
+			if err != nil {
+				_ = yield(Symbol{}, fmt.Errorf("failed to get symbols: %w", err))
+				return
+			}
 
-	var unused bool
-	var testOnly bool
-	if len(refs) == 0 {
-		unused = true
-	} else {
-		testOnly = true
-		for _, ref := range refs {
-			if !strings.HasSuffix(string(ref.URI), "_test.go") {
-				testOnly = false
-				break
+			if debug {
+				fmt.Println(scuf.String(filename, scuf.FgGreen))
+			}
+			for _, s := range symbols {
+				if !r.handleSymbol(filename, s, yield) {
+					return
+				}
+			}
+			if debug {
+				fmt.Println()
 			}
 		}
 	}
-
-	res := []Diagnostic{}
-	if unused || testOnly {
-		res = append(res, Diagnostic{
-			Filename:   filename,
-			Symbol:     symbol,
-			IsTestOnly: testOnly,
-		})
-	}
-
-	for _, child := range symbol.Children {
-		diagnostics, err := r.handleSymbol(filename, child)
-		if err != nil {
-			return nil, err
-		}
-
-		res = append(res, diagnostics...)
-	}
-
-	return res, nil
 }
 
-func (r *runner) handleFile(filename string) ([]Diagnostic, error) {
-	if strings.HasSuffix(filename, "_test.go") {
-		return nil, nil
-	}
+func (r *runner) diagnostics(symbols iter.Seq2[Symbol, error]) iter.Seq2[diagnostic, error] {
+	return func(yield func(diagnostic, error) bool) {
+		for symbol, err := range symbols {
+			if err != nil {
+				yield(diagnostic{}, err)
+				return
+			}
 
-	symbols, err := r.client.DocumentSymbol(filename)
-	if err != nil {
-		return nil, fmt.Errorf("get symbols from %q: %w", filename, err)
-	}
+			if debug {
+				fmt.Printf(
+					"%s %s : %s\n",
+					scuf.String(symbol.Location.Range.String(), scuf.FgBlack)+strings.Repeat(" ", 12-len(symbol.Location.Range.String())),
+					symbol.Name,
+					colorKind(symbol.Kind),
+				)
+			}
 
-	res := []Diagnostic{}
-	for _, s := range symbols {
-		diagnostics, err := r.handleSymbol(filename, s)
-		if err != nil {
-			return nil, err
+			if r.isSymbolExcluded(symbol) {
+				continue
+			}
+
+			name := symbol.Name
+			if symbol.Kind == lsp.SKMethod {
+				// Struct methods' Name comes on the form  (MyType).MyMethod.
+				if _, method, ok := strings.Cut(name, "."); ok {
+					name = method
+				}
+			}
+
+			// TODO: skip if Public symbol outside of internal package
+			// if len(s) > 0 && s[0] >= 'A' && s[0] <= 'Z'
+
+			refs, err := r.client.DocumentReferences(symbol.Location)
+			if err != nil {
+				yield(diagnostic{}, fmt.Errorf("failed to get references: %w", err))
+				return
+			}
+
+			if debug {
+				for _, ref := range refs {
+					fmt.Println("\t", *ref)
+				}
+			}
+
+			cont := true
+			switch {
+			case len(refs) == 0:
+				cont = yield(diagnostic{symbol, false}, nil)
+			case !slices.ContainsFunc(refs, func(ref *lsp.Location) bool { return !strings.HasSuffix(string(ref.URI), "_test.go") }):
+				cont = yield(diagnostic{symbol, true}, nil)
+			}
+			if !cont {
+				return
+			}
 		}
-		res = append(res, diagnostics...)
 	}
-	return res, nil
 }
