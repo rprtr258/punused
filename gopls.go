@@ -12,7 +12,8 @@ import (
 	"sync"
 	"sync/atomic"
 
-	lsp "github.com/sourcegraph/go-lsp"
+	"github.com/samber/lo"
+	lsp "github.com/tliron/glsp/protocol_3_16"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -40,17 +41,11 @@ func newClient(ctx context.Context, workspaceDir string) (*GoplsClient, error) {
 	}
 
 	initParams := &lsp.InitializeParams{
-		RootURI: client.documentURI(""),
+		RootURI: lo.ToPtr(client.documentURI("")),
 		Capabilities: lsp.ClientCapabilities{
-			TextDocument: lsp.TextDocumentClientCapabilities{
-				DocumentSymbol: struct {
-					SymbolKind struct {
-						ValueSet []int `json:"valueSet,omitempty"`
-					} `json:"symbolKind,omitEmpty"`
-
-					HierarchicalDocumentSymbolSupport bool `json:"hierarchicalDocumentSymbolSupport,omitempty"`
-				}{
-					HierarchicalDocumentSymbolSupport: true,
+			TextDocument: &lsp.TextDocumentClientCapabilities{
+				DocumentSymbol: &lsp.DocumentSymbolClientCapabilities{
+					HierarchicalDocumentSymbolSupport: lo.ToPtr(true),
 				},
 			},
 		},
@@ -123,7 +118,7 @@ type GoplsClient struct {
 }
 
 // Call calls the gopls method with the params given. If result is non-nil, the response body is unmarshalled into it.
-func (c *GoplsClient) Call(method string, params, result interface{}) error {
+func (c *GoplsClient) Call(method string, params, result any) error {
 	// Only allow one call at a time for now.
 	c.callMu.Lock()
 	defer c.callMu.Unlock()
@@ -131,7 +126,7 @@ func (c *GoplsClient) Call(method string, params, result interface{}) error {
 	id := atomic.AddUint64(&requestID, 1)
 	req := request{
 		RPCVersion: "2.0",
-		ID: lsp.ID{
+		ID: lspID{
 			Num: id,
 		},
 		Method: method,
@@ -196,7 +191,7 @@ func (c *GoplsClient) DocumentSymbol(filename string) ([]Symbol, error) {
 		},
 	}
 
-	var result []DocumentSymbol
+	var result []lsp.DocumentSymbol
 	if err := c.Call("textDocument/documentSymbol", params, &result); err != nil {
 		return nil, err
 	}
@@ -304,7 +299,6 @@ func (c *GoplsClient) Write(r request) error {
 
 func (c *GoplsClient) Initialize(params *lsp.InitializeParams) (*lsp.InitializeResult, error) {
 	var result lsp.InitializeResult
-
 	if err := c.Call("initialize", params, &result); err != nil {
 		return nil, err
 	}
@@ -312,10 +306,10 @@ func (c *GoplsClient) Initialize(params *lsp.InitializeParams) (*lsp.InitializeR
 }
 
 func (c *GoplsClient) Initialized() error {
-	return c.Call("initialized", &InitializedParams{}, nil)
+	return c.Call("initialized", lsp.InitializedParams{}, nil)
 }
 
-func (c *GoplsClient) documentSymbolToSymbol(uri lsp.DocumentURI, ds DocumentSymbol, filename string) Symbol {
+func (c *GoplsClient) documentSymbolToSymbol(uri lsp.DocumentUri, ds lsp.DocumentSymbol, filename string) Symbol {
 	s := Symbol{
 		Name:     ds.Name,
 		Kind:     ds.Kind,
@@ -332,12 +326,12 @@ func (c *GoplsClient) documentSymbolToSymbol(uri lsp.DocumentURI, ds DocumentSym
 	return s
 }
 
-func (c *GoplsClient) documentURI(filename string) lsp.DocumentURI {
+func (c *GoplsClient) documentURI(filename string) lsp.DocumentUri {
 	filename = filepath.ToSlash(filename)
 	if filepath.IsAbs(filename) {
-		return lsp.DocumentURI("file://" + filename)
+		return lsp.DocumentUri("file://" + filename)
 	}
-	return lsp.DocumentURI("file://" + filepath.Join(c.workspaceDir, filename))
+	return lsp.DocumentUri("file://" + filepath.Join(c.workspaceDir, filename))
 }
 
 type Symbol struct {
@@ -348,11 +342,15 @@ type Symbol struct {
 	Children []Symbol
 }
 
+type lspID struct {
+	Num uint64
+}
+
 type request struct {
-	RPCVersion string      `json:"jsonrpc"`
-	ID         lsp.ID      `json:"id"`
-	Method     string      `json:"method"`
-	Params     interface{} `json:"params"`
+	RPCVersion string `json:"jsonrpc"`
+	ID         lspID  `json:"id"`
+	Method     string `json:"method"`
+	Params     any    `json:"params"`
 }
 
 type response struct {

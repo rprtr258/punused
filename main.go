@@ -66,7 +66,7 @@ func run(ctx context.Context, cfg RunConfig, w io.Writer) (err error) {
 		fmt.Fprintf(w, "%s:%d:%d %s %s is ",
 			diag.Symbol.Filename,
 			loc.Line+1, loc.Character+1,
-			strings.ToLower(string(s.Kind.String())),
+			strings.ToLower(string(kindString(s.Kind))),
 			s.Name,
 		)
 		if diag.IsTestOnly {

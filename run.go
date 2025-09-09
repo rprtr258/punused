@@ -10,13 +10,8 @@ import (
 
 	"github.com/gobwas/glob"
 	"github.com/rprtr258/scuf"
-	lsp "github.com/sourcegraph/go-lsp"
+	lsp "github.com/tliron/glsp/protocol_3_16"
 )
-
-type diagnostic struct {
-	Symbol     Symbol
-	IsTestOnly bool
-}
 
 type RunConfig struct {
 	WorkspaceDir    string
@@ -54,7 +49,7 @@ func (r *runner) isFileExcluded(filename string) bool {
 }
 
 func (r *runner) handleSymbol(filename string, s Symbol, yield func(Symbol, error) bool) bool {
-	if !yield(s, nil) {
+	if !r.isSymbolExcluded(s) && !yield(s, nil) {
 		return false
 	}
 
@@ -69,14 +64,14 @@ func (r *runner) handleSymbol(filename string, s Symbol, yield func(Symbol, erro
 
 func colorKind(kind lsp.SymbolKind) string {
 	switch kind {
-	case lsp.SKVariable, lsp.SKConstant, lsp.SKField:
-		return scuf.String(kind.String(), scuf.FgHiGreen)
-	case lsp.SKFunction, lsp.SKMethod:
-		return scuf.String(kind.String(), scuf.FgHiBlue)
-	case lsp.SKInterface, lsp.SKStruct, lsp.SKClass:
-		return scuf.String(kind.String(), scuf.FgHiMagenta)
+	case lsp.SymbolKindVariable, lsp.SymbolKindConstant, lsp.SymbolKindField:
+		return scuf.String(kindString(kind), scuf.FgHiGreen)
+	case lsp.SymbolKindFunction, lsp.SymbolKindMethod:
+		return scuf.String(kindString(kind), scuf.FgHiBlue)
+	case lsp.SymbolKindInterface, lsp.SymbolKindStruct, lsp.SymbolKindClass:
+		return scuf.String(kindString(kind), scuf.FgHiMagenta)
 	default:
-		return kind.String()
+		return kindString(kind)
 	}
 }
 
@@ -111,10 +106,28 @@ func (r *runner) Walk(yield func(string, error) bool) {
 	}
 }
 
-const debug = false
+const debug = true
 
-func (r *runner) isSymbolExcluded(symbol Symbol) bool {
-	return symbol.Kind == lsp.SKFunction && (symbol.Name == "init" || symbol.Name == "main")
+func kindString(kind lsp.SymbolKind) string {
+	m := map[lsp.SymbolKind]string{
+		lsp.SymbolKindVariable:  "Variable",
+		lsp.SymbolKindConstant:  "Constant",
+		lsp.SymbolKindField:     "Field",
+		lsp.SymbolKindFunction:  "Function",
+		lsp.SymbolKindMethod:    "Method",
+		lsp.SymbolKindInterface: "Interface",
+		lsp.SymbolKindStruct:    "Struct",
+		lsp.SymbolKindClass:     "Class",
+	}
+	res, ok := m[kind]
+	if ok {
+		return res
+	}
+	return fmt.Sprint(kind)
+}
+
+func rangeString(r lsp.Range) string {
+	return fmt.Sprintf("%v-%v", r.Start, r.End)
 }
 
 func (r *runner) symbols(filenames iter.Seq2[string, error]) iter.Seq2[Symbol, error] {
@@ -157,26 +170,22 @@ func (r *runner) diagnostics(symbols iter.Seq2[Symbol, error]) iter.Seq2[diagnos
 			if debug {
 				fmt.Printf(
 					"%s %s : %s\n",
-					scuf.String(symbol.Location.Range.String(), scuf.FgBlack)+strings.Repeat(" ", 12-len(symbol.Location.Range.String())),
+					scuf.String(rangeString(symbol.Location.Range), scuf.FgBlack)+strings.Repeat(" ", 12-len(rangeString(symbol.Location.Range))),
 					symbol.Name,
 					colorKind(symbol.Kind),
 				)
 			}
+			fmt.Println(scuf.String(symbol.Filename, scuf.FgGreen))
+			fmt.Printf(
+				"%s %s : %s\n",
+				scuf.String(rangeString(symbol.Location.Range), scuf.FgBlack)+strings.Repeat(" ", 12-len(rangeString(symbol.Location.Range))),
+				symbol.Name,
+				colorKind(symbol.Kind),
+			)
 
 			if r.isSymbolExcluded(symbol) {
 				continue
 			}
-
-			name := symbol.Name
-			if symbol.Kind == lsp.SKMethod {
-				// Struct methods' Name comes on the form  (MyType).MyMethod.
-				if _, method, ok := strings.Cut(name, "."); ok {
-					name = method
-				}
-			}
-
-			// TODO: skip if Public symbol outside of internal package
-			// if len(s) > 0 && s[0] >= 'A' && s[0] <= 'Z'
 
 			refs, err := r.client.DocumentReferences(symbol.Location)
 			if err != nil {
@@ -202,4 +211,32 @@ func (r *runner) diagnostics(symbols iter.Seq2[Symbol, error]) iter.Seq2[diagnos
 			}
 		}
 	}
+}
+
+type diagnostic struct {
+	Symbol     Symbol
+	IsTestOnly bool
+}
+
+func (r *runner) isSymbolExcluded(symbol Symbol) bool {
+	if symbol.Kind == lsp.SymbolKindFunction && (symbol.Name == "init" || symbol.Name == "main") {
+		return true
+	}
+
+	base := symbol.Name
+	if symbol.Kind == lsp.SymbolKindMethod && strings.Contains(base, ".") {
+		// Struct methods' Name comes on the form (MyType).MyMethod
+		base = symbol.Name[strings.Index(symbol.Name, ".")+1:]
+	}
+
+	if !isExported(base) {
+		return true
+	}
+
+	return slices.Contains(r.cfg.ExcludedSymbols, symbol.Name)
+}
+
+func isExported(s string) bool {
+	return s != "init" && s != "main" // TODO: exclude main, init
+	// return len(s) > 0 && s[0] >= 'A' && s[0] <= 'Z'
 }

@@ -8,7 +8,10 @@ I have used this in Hugo (a monorepo with many packages), and it works, but ther
 * It does not detect references via `reflect`.
 * Some possible surprises when it comes to interfaces.
 
-So, you should inspect and test the proposed deletes. See this [test repo](https://github.com/bep/unused-test) for more information.
+Differences from [original](https://github.com/bep/punused):
+ - Default pattern is `**.go` which scans all go files in workspace.
+ - Configurable using [config](#config) file.
+ - Exits with non-zero code if found at least one unused symbol. So the linter is usable in CI pipelines.
 
 ## Install
 
