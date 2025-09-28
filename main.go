@@ -11,8 +11,6 @@ import (
 
 	"github.com/gobwas/glob"
 	"gopkg.in/yaml.v3"
-
-	"github.com/rprtr258/punused/internal/lib"
 )
 
 const (
@@ -103,7 +101,7 @@ func run() error {
 		return err
 	}
 
-	return lib.Run(ctx, lib.RunConfig{
+	return Run(ctx, RunConfig{
 		WorkspaceDir:    workdir,
 		FilenamePattern: patternGlob,
 		ExcludedPaths:   config.ExcludedPaths,

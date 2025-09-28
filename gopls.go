@@ -1,4 +1,4 @@
-package lib
+package main
 
 import (
 	"context"
@@ -37,7 +37,7 @@ func newClient(ctx context.Context, workspaceDir string) (*GoplsClient, error) {
 	client := &GoplsClient{conn: conn, workspaceDir: workspaceDir}
 
 	initParams := &lsp.InitializeParams{
-		RootURI: lsp.DocumentURI(client.documentURI("")),
+		RootURI: client.documentURI(""),
 		Capabilities: lsp.ClientCapabilities{
 			TextDocument: lsp.TextDocumentClientCapabilities{
 				DocumentSymbol: struct {
@@ -188,8 +188,8 @@ func (c *GoplsClient) DocumentReferences(ctx context.Context, loc lsp.Location) 
 	return result, nil
 }
 
-func (c *GoplsClient) DocumentSymbol(ctx context.Context, filename string) ([]*Symbol, error) {
-	uri := lsp.DocumentURI(c.documentURI(filename))
+func (c *GoplsClient) DocumentSymbol(ctx context.Context, filename string) ([]Symbol, error) {
+	uri := c.documentURI(filename)
 	params := &lsp.DocumentSymbolParams{
 		TextDocument: lsp.TextDocumentIdentifier{
 			URI: uri,
@@ -197,16 +197,14 @@ func (c *GoplsClient) DocumentSymbol(ctx context.Context, filename string) ([]*S
 	}
 
 	var result []DocumentSymbol
-
 	if err := c.Call(ctx, "textDocument/documentSymbol", params, &result); err != nil {
 		return nil, err
 	}
 
-	var symbols []*Symbol
+	var symbols []Symbol
 	for _, r := range result {
 		symbols = append(symbols, c.documentSymbolToSymbol(uri, r))
 	}
-
 	return symbols, nil
 }
 
@@ -317,36 +315,35 @@ func (c *GoplsClient) Initialized(ctx context.Context) error {
 	return c.Call(ctx, "initialized", &InitializedParams{}, nil)
 }
 
-func (c *GoplsClient) documentSymbolToSymbol(uri lsp.DocumentURI, ds DocumentSymbol) *Symbol {
-	s := &Symbol{
+func (c *GoplsClient) documentSymbolToSymbol(uri lsp.DocumentURI, ds DocumentSymbol) Symbol {
+	s := Symbol{
 		Name: ds.Name,
 		Kind: ds.Kind,
 		Location: lsp.Location{
 			URI:   uri,
 			Range: ds.SelectionRange,
 		},
+		Children: make([]Symbol, 0, len(ds.Children)),
 	}
-
 	for _, d := range ds.Children {
 		s.Children = append(s.Children, c.documentSymbolToSymbol(uri, d))
 	}
-
 	return s
 }
 
-func (c *GoplsClient) documentURI(filename string) string {
+func (c *GoplsClient) documentURI(filename string) lsp.DocumentURI {
 	filename = filepath.ToSlash(filename)
 	if path.IsAbs(filename) {
-		return "file://" + filename
+		return lsp.DocumentURI("file://" + filename)
 	}
-	return "file://" + path.Join(c.workspaceDir, filename)
+	return lsp.DocumentURI("file://" + path.Join(c.workspaceDir, filename))
 }
 
 type Symbol struct {
 	Name     string
 	Kind     lsp.SymbolKind
 	Location lsp.Location
-	Children []*Symbol
+	Children []Symbol
 }
 
 type request struct {

@@ -1,4 +1,4 @@
-package lib
+package main
 
 import (
 	"context"
@@ -17,7 +17,7 @@ import (
 
 type Diagnostic struct {
 	Filename   string
-	Symbol     *Symbol
+	Symbol     Symbol
 	IsTestOnly bool
 }
 
@@ -174,7 +174,7 @@ func (r *runner) Walk(ctx context.Context) func(func(Diagnostic, error)) {
 	}
 }
 
-func (r *runner) isSymbolExcluded(symbol *Symbol) bool {
+func (r *runner) isSymbolExcluded(symbol Symbol) bool {
 	base := symbol.Name
 	if symbol.Kind == lsp.SKMethod && strings.Contains(base, ".") {
 		// Struct methods' Name comes on the form (MyType).MyMethod
@@ -195,7 +195,7 @@ func (r *runner) isSymbolExcluded(symbol *Symbol) bool {
 	return false
 }
 
-func (r *runner) handleSymbol(ctx context.Context, filename string, symbol *Symbol) ([]Diagnostic, error) {
+func (r *runner) handleSymbol(ctx context.Context, filename string, symbol Symbol) ([]Diagnostic, error) {
 	if r.isSymbolExcluded(symbol) {
 		return nil, nil
 	}
