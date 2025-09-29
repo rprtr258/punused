@@ -152,13 +152,12 @@ func (r *runner) Walk(ctx context.Context) func(func(Diagnostic, error)) {
 				return nil
 			}
 
-			base := strings.TrimPrefix(filepath.ToSlash(strings.TrimPrefix(path, r.cfg.WorkspaceDir)), "/")
-
-			if r.isFileExcluded(base) {
+			filename := strings.TrimPrefix(filepath.ToSlash(strings.TrimPrefix(path, r.cfg.WorkspaceDir)), "/")
+			if r.isFileExcluded(filename) {
 				return nil
 			}
 
-			diagnostics, err := r.handleFile(ctx, base)
+			diagnostics, err := r.handleFile(filename)
 			if err != nil {
 				return err
 			}
@@ -195,12 +194,12 @@ func (r *runner) isSymbolExcluded(symbol Symbol) bool {
 	return false
 }
 
-func (r *runner) handleSymbol(ctx context.Context, filename string, symbol Symbol) ([]Diagnostic, error) {
+func (r *runner) handleSymbol(filename string, symbol Symbol) ([]Diagnostic, error) {
 	if r.isSymbolExcluded(symbol) {
 		return nil, nil
 	}
 
-	refs, err := r.client.DocumentReferences(ctx, symbol.Location)
+	refs, err := r.client.DocumentReferences(symbol.Location)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get references: %w", err)
 	}
@@ -229,7 +228,7 @@ func (r *runner) handleSymbol(ctx context.Context, filename string, symbol Symbo
 	}
 
 	for _, child := range symbol.Children {
-		diagnostics, err := r.handleSymbol(ctx, filename, child)
+		diagnostics, err := r.handleSymbol(filename, child)
 		if err != nil {
 			return nil, err
 		}
@@ -240,19 +239,19 @@ func (r *runner) handleSymbol(ctx context.Context, filename string, symbol Symbo
 	return res, nil
 }
 
-func (r *runner) handleFile(ctx context.Context, filename string) ([]Diagnostic, error) {
+func (r *runner) handleFile(filename string) ([]Diagnostic, error) {
 	if strings.HasSuffix(filename, "_test.go") {
 		return nil, nil
 	}
 
-	symbols, err := r.client.DocumentSymbol(ctx, filename)
+	symbols, err := r.client.DocumentSymbol(filename)
 	if err != nil {
 		return nil, fmt.Errorf("get symbols from %q: %w", filename, err)
 	}
 
 	res := []Diagnostic{}
 	for _, s := range symbols {
-		diagnostics, err := r.handleSymbol(ctx, filename, s)
+		diagnostics, err := r.handleSymbol(filename, s)
 		if err != nil {
 			return nil, err
 		}

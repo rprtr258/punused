@@ -7,7 +7,6 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"path"
 	"path/filepath"
 	"strconv"
 	"sync"
@@ -20,9 +19,9 @@ import (
 var requestID uint64 = 5000
 
 func newClient(ctx context.Context, workspaceDir string) (*GoplsClient, error) {
-	workspaceDir = path.Clean(filepath.ToSlash(workspaceDir))
+	workspaceDir = filepath.Clean(filepath.ToSlash(workspaceDir))
 
-	args := []string{"serve"} // , "-rpc.trace", "-logfile=/Users/rprtr258/dev/gopls.log"}
+	args := []string{"serve"} //, "-rpc.trace", "-logfile=/Users/bep/dev/gopls.log"}
 	cmd := exec.Command("gopls", args...)
 	cmd.Stderr = os.Stderr
 	conn, err := newConn(cmd)
@@ -34,7 +33,11 @@ func newClient(ctx context.Context, workspaceDir string) (*GoplsClient, error) {
 		return nil, err
 	}
 
-	client := &GoplsClient{conn: conn, workspaceDir: workspaceDir}
+	client := &GoplsClient{
+		ctx:          ctx,
+		workspaceDir: workspaceDir,
+		conn:         conn,
+	}
 
 	initParams := &lsp.InitializeParams{
 		RootURI: client.documentURI(""),
@@ -53,12 +56,12 @@ func newClient(ctx context.Context, workspaceDir string) (*GoplsClient, error) {
 		},
 	}
 
-	_, err = client.Initialize(ctx, initParams)
+	_, err = client.Initialize(initParams)
 	if err != nil {
 		return nil, err
 	}
 
-	err = client.Initialized(ctx)
+	err = client.Initialized()
 
 	return client, err
 }
@@ -112,6 +115,7 @@ func (c Conn) Start() error {
 }
 
 type GoplsClient struct {
+	ctx          context.Context
 	workspaceDir string
 
 	callMu sync.Mutex
@@ -119,7 +123,7 @@ type GoplsClient struct {
 }
 
 // Call calls the gopls method with the params given. If result is non-nil, the response body is unmarshalled into it.
-func (c *GoplsClient) Call(ctx context.Context, method string, params, result interface{}) error {
+func (c *GoplsClient) Call(method string, params, result interface{}) error {
 	// Only allow one call at a time for now.
 	c.callMu.Lock()
 	defer c.callMu.Unlock()
@@ -139,13 +143,12 @@ func (c *GoplsClient) Call(ctx context.Context, method string, params, result in
 	}
 
 	respChan := make(chan response)
-	wg, ctx := errgroup.WithContext(ctx)
+	wg, ctx := errgroup.WithContext(c.ctx)
 	wg.Go(func() error {
 		return c.Read(ctx, id, respChan)
 	})
 
 	var unmarshalErr error
-
 	select {
 	case resp := <-respChan:
 		if result != nil && resp.Result != nil {
@@ -165,9 +168,7 @@ func (c *GoplsClient) Close() error {
 	return c.conn.Close()
 }
 
-func (c *GoplsClient) DocumentReferences(ctx context.Context, loc lsp.Location) ([]*lsp.Location, error) {
-	start := loc.Range.Start
-
+func (c *GoplsClient) DocumentReferences(loc lsp.Location) ([]*lsp.Location, error) {
 	params := &lsp.ReferenceParams{
 		Context: lsp.ReferenceContext{
 			IncludeDeclaration: false,
@@ -176,19 +177,18 @@ func (c *GoplsClient) DocumentReferences(ctx context.Context, loc lsp.Location) 
 			TextDocument: lsp.TextDocumentIdentifier{
 				URI: loc.URI,
 			},
-			Position: start,
+			Position: loc.Range.Start,
 		},
 	}
 
 	var result []*lsp.Location
-
-	if err := c.Call(ctx, "textDocument/references", params, &result); err != nil {
+	if err := c.Call("textDocument/references", params, &result); err != nil {
 		return nil, err
 	}
 	return result, nil
 }
 
-func (c *GoplsClient) DocumentSymbol(ctx context.Context, filename string) ([]Symbol, error) {
+func (c *GoplsClient) DocumentSymbol(filename string) ([]Symbol, error) {
 	uri := c.documentURI(filename)
 	params := &lsp.DocumentSymbolParams{
 		TextDocument: lsp.TextDocumentIdentifier{
@@ -197,13 +197,13 @@ func (c *GoplsClient) DocumentSymbol(ctx context.Context, filename string) ([]Sy
 	}
 
 	var result []DocumentSymbol
-	if err := c.Call(ctx, "textDocument/documentSymbol", params, &result); err != nil {
+	if err := c.Call("textDocument/documentSymbol", params, &result); err != nil {
 		return nil, err
 	}
 
 	var symbols []Symbol
 	for _, r := range result {
-		symbols = append(symbols, c.documentSymbolToSymbol(uri, r))
+		symbols = append(symbols, c.documentSymbolToSymbol(uri, r, filename))
 	}
 	return symbols, nil
 }
@@ -302,23 +302,24 @@ func (c *GoplsClient) Write(r request) error {
 	return err
 }
 
-func (c *GoplsClient) Initialize(ctx context.Context, params *lsp.InitializeParams) (*lsp.InitializeResult, error) {
+func (c *GoplsClient) Initialize(params *lsp.InitializeParams) (*lsp.InitializeResult, error) {
 	var result lsp.InitializeResult
 
-	if err := c.Call(ctx, "initialize", params, &result); err != nil {
+	if err := c.Call("initialize", params, &result); err != nil {
 		return nil, err
 	}
 	return &result, nil
 }
 
-func (c *GoplsClient) Initialized(ctx context.Context) error {
-	return c.Call(ctx, "initialized", &InitializedParams{}, nil)
+func (c *GoplsClient) Initialized() error {
+	return c.Call("initialized", &InitializedParams{}, nil)
 }
 
-func (c *GoplsClient) documentSymbolToSymbol(uri lsp.DocumentURI, ds DocumentSymbol) Symbol {
+func (c *GoplsClient) documentSymbolToSymbol(uri lsp.DocumentURI, ds DocumentSymbol, filename string) Symbol {
 	s := Symbol{
-		Name: ds.Name,
-		Kind: ds.Kind,
+		Name:     ds.Name,
+		Kind:     ds.Kind,
+		Filename: filename,
 		Location: lsp.Location{
 			URI:   uri,
 			Range: ds.SelectionRange,
@@ -326,22 +327,23 @@ func (c *GoplsClient) documentSymbolToSymbol(uri lsp.DocumentURI, ds DocumentSym
 		Children: make([]Symbol, 0, len(ds.Children)),
 	}
 	for _, d := range ds.Children {
-		s.Children = append(s.Children, c.documentSymbolToSymbol(uri, d))
+		s.Children = append(s.Children, c.documentSymbolToSymbol(uri, d, filename))
 	}
 	return s
 }
 
 func (c *GoplsClient) documentURI(filename string) lsp.DocumentURI {
 	filename = filepath.ToSlash(filename)
-	if path.IsAbs(filename) {
+	if filepath.IsAbs(filename) {
 		return lsp.DocumentURI("file://" + filename)
 	}
-	return lsp.DocumentURI("file://" + path.Join(c.workspaceDir, filename))
+	return lsp.DocumentURI("file://" + filepath.Join(c.workspaceDir, filename))
 }
 
 type Symbol struct {
 	Name     string
 	Kind     lsp.SymbolKind
+	Filename string // TODO: remove, get from location?
 	Location lsp.Location
 	Children []Symbol
 }
