@@ -12,14 +12,14 @@ import (
 
 func TestRun(t *testing.T) {
 	// The WorkDir needs to be a the module (workspace) root.
-	wd, _ := os.Getwd()
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+		t.FailNow()
+	}
 
 	var buff bytes.Buffer
-	if err := run(t.Context(), RunConfig{
-		WorkspaceDir:    wd,
-		FilenameMatcher: glob.MustCompile("testdata/**"),
-		SkipTests:       true,
-	}, &buff); err != nil {
+	if err := run(t.Context(), glob.MustCompile("testdata/**"), wd, true, &buff); err != nil {
 		t.Fatal(err.Error())
 		t.FailNow()
 	}

@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/rprtr258/punused/testdata/firstpackage"
+	"github.com/rprtr258/punused-testdata/firstpackage"
 )
 
 func TestUseTestlib1(t *testing.T) {

@@ -1,3 +1,3 @@
-module github.com/rprtr258/punused/testdata
+module github.com/rprtr258/punused-testdata
 
-go 1.24.4
+go 1.24.0
