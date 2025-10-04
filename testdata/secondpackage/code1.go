@@ -3,7 +3,7 @@ package secondpackage
 import (
 	"fmt"
 
-	"github.com/rprtr258/punused/internal/lib/testpackages/firstpackage"
+	"github.com/rprtr258/punused-testdata/firstpackage"
 )
 
 func UseStuffInFirstPackage() {

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,30 +13,36 @@ import (
 	"sync"
 	"sync/atomic"
 
-	lsp "github.com/sourcegraph/go-lsp"
+	"github.com/pkg/errors"
+	"github.com/sourcegraph/conc/pool"
 	"golang.org/x/sync/errgroup"
+
+	"github.com/rprtr258/punused/internal/lsp"
 )
 
 var requestID uint64 = 5000
 
 func newClient(ctx context.Context, workspaceDir string) (*GoplsClient, error) {
-	workspaceDir = filepath.Clean(filepath.ToSlash(workspaceDir))
-
-	args := []string{"serve"} //, "-rpc.trace", "-logfile=/Users/bep/dev/gopls.log"}
+	args := []string{
+		"serve",
+		// "-rpc.trace",
+		// "-logfile=gopls.log",
+	}
 	cmd := exec.Command("gopls", args...)
 	cmd.Stderr = os.Stderr
+	cmd.Dir = workspaceDir
 	conn, err := newConn(cmd)
 	if err != nil {
-		return nil, err
+		return nil, errors.Wrap(err, "newConn")
 	}
 
 	if err := conn.Start(); err != nil {
-		return nil, err
+		return nil, errors.Wrap(err, "start")
 	}
 
 	client := &GoplsClient{
 		ctx:          ctx,
-		workspaceDir: workspaceDir,
+		workspaceDir: filepath.Clean(filepath.ToSlash(workspaceDir)),
 		conn:         conn,
 	}
 
@@ -44,26 +51,29 @@ func newClient(ctx context.Context, workspaceDir string) (*GoplsClient, error) {
 		Capabilities: lsp.ClientCapabilities{
 			TextDocument: lsp.TextDocumentClientCapabilities{
 				DocumentSymbol: struct {
-					SymbolKind struct {
-						ValueSet []int `json:"valueSet,omitempty"`
-					} `json:"symbolKind,omitEmpty"`
-
+					// SymbolKind struct {
+					// 	ValueSet []int `json:"valueSet,omitempty"`
+					// } `json:"symbolKind"`
 					HierarchicalDocumentSymbolSupport bool `json:"hierarchicalDocumentSymbolSupport,omitempty"`
 				}{
 					HierarchicalDocumentSymbolSupport: true,
 				},
 			},
 		},
+		WorkspaceFolders: []lsp.WorkspaceFolder{
+			{
+				URI: client.documentURI(""),
+			},
+		},
 	}
 
-	_, err = client.Initialize(initParams)
-	if err != nil {
-		return nil, err
+	if _, err := client.Initialize(initParams); err != nil {
+		return nil, errors.Wrap(err, "initialize")
 	}
 
 	err = client.Initialized()
 
-	return client, err
+	return client, errors.Wrap(err, "initialized")
 }
 
 func newConn(cmd *exec.Cmd) (_ Conn, err error) {
@@ -73,14 +83,12 @@ func newConn(cmd *exec.Cmd) (_ Conn, err error) {
 	}
 	defer func() {
 		if err != nil {
-			in.Close()
+			_ = in.Close()
 		}
 	}()
 
 	out, err := cmd.StdoutPipe()
-	c := Conn{out, in, cmd}
-
-	return c, err
+	return Conn{out, in, cmd}, err
 }
 
 type Conn struct {
@@ -109,9 +117,9 @@ func (c Conn) Close() error {
 func (c Conn) Start() error {
 	err := c.cmd.Start()
 	if err != nil {
-		return c.Close()
+		return errors.Wrapf(err, "close: %v", c.Close())
 	}
-	return err
+	return errors.Wrap(err, "start")
 }
 
 type GoplsClient struct {
@@ -123,13 +131,13 @@ type GoplsClient struct {
 }
 
 // Call calls the gopls method with the params given. If result is non-nil, the response body is unmarshalled into it.
-func (c *GoplsClient) Call(method string, params, result interface{}) error {
+func (c *GoplsClient) Call(method string, params, result any) error {
 	// Only allow one call at a time for now.
 	c.callMu.Lock()
 	defer c.callMu.Unlock()
 
 	id := atomic.AddUint64(&requestID, 1)
-	req := request{
+	req := lsp.Request{
 		RPCVersion: "2.0",
 		ID: lsp.ID{
 			Num: id,
@@ -139,18 +147,90 @@ func (c *GoplsClient) Call(method string, params, result interface{}) error {
 	}
 
 	if err := c.Write(req); err != nil {
-		return err
+		return errors.Wrap(err, "write")
 	}
 
-	respChan := make(chan response)
+	respChan := make(chan lsp.Response)
 	wg, ctx := errgroup.WithContext(c.ctx)
 	wg.Go(func() error {
-		return c.Read(ctx, id, respChan)
+		// Read from gopls until candidate is found and sent on respChan.
+		done := make(chan bool)
+		wg := pool.New().WithContext(ctx).WithCancelOnError()
+		wg.Go(func(ctx context.Context) error {
+			for {
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				default:
+					buff := make([]byte, 16)
+					if _, err := io.ReadFull(c.conn, buff); err != nil {
+						return errors.Wrap(err, "ReadFull")
+					}
+
+					cl := make([]byte, 0, 2)
+					buff = buff[:1]
+					for {
+						if _, err := io.ReadFull(c.conn, buff); err != nil {
+							return errors.Wrap(err, "ReadFull")
+						}
+						if buff[0] == '\r' {
+							break
+						}
+						cl = append(cl, buff[0])
+					}
+
+					// Consume the \n\r\n
+					buff = buff[:3]
+					if _, err := io.ReadFull(c.conn, buff); err != nil {
+						return errors.Wrap(err, "ReadFull")
+					}
+
+					contentLength, err := strconv.Atoi(string(cl))
+					if err != nil {
+						return errors.Wrap(err, "atoi")
+					}
+
+					buff = make([]byte, contentLength)
+					if _, err = io.ReadFull(c.conn, buff); err != nil {
+						return errors.Wrap(err, "ReadFull")
+					}
+
+					var resp lsp.Response
+					if err := json.Unmarshal(buff, &resp); err != nil {
+						return errors.Wrap(err, "unmarshal")
+					}
+
+					// gopls sends a lot of chatter with ID=0 (notifications meant for the editor).
+					// We need to ignore those.
+					if resp.ID == id {
+						close(done)
+						respChan <- resp
+						return nil
+					}
+				}
+			}
+		})
+
+		wg.Go(func(ctx context.Context) error {
+			for {
+				select {
+				case <-done:
+					return nil
+				case <-ctx.Done():
+					return c.conn.Close()
+				}
+			}
+		})
+
+		return wg.Wait()
 	})
 
 	var unmarshalErr error
 	select {
 	case resp := <-respChan:
+		if resp.Error != nil {
+			log.Println(resp.Error)
+		}
 		if result != nil && resp.Result != nil {
 			unmarshalErr = json.Unmarshal(resp.Result, result)
 		}
@@ -159,17 +239,17 @@ func (c *GoplsClient) Call(method string, params, result interface{}) error {
 	}
 
 	if err := wg.Wait(); err != nil {
-		return err
+		return errors.Wrap(err, "wait")
 	}
-	return unmarshalErr
+	return errors.Wrap(unmarshalErr, "unmarshal")
 }
 
 func (c *GoplsClient) Close() error {
 	return c.conn.Close()
 }
 
-func (c *GoplsClient) DocumentReferences(loc lsp.Location) ([]*lsp.Location, error) {
-	params := &lsp.ReferenceParams{
+func (c *GoplsClient) DocumentReferences(loc lsp.Location) ([]lsp.Location, error) {
+	params := &lsp.ReferencesParams{
 		Context: lsp.ReferenceContext{
 			IncludeDeclaration: false,
 		},
@@ -181,14 +261,14 @@ func (c *GoplsClient) DocumentReferences(loc lsp.Location) ([]*lsp.Location, err
 		},
 	}
 
-	var result []*lsp.Location
+	var result []lsp.Location
 	if err := c.Call("textDocument/references", params, &result); err != nil {
 		return nil, err
 	}
 	return result, nil
 }
 
-func (c *GoplsClient) DocumentSymbol(filename string) ([]Symbol, error) {
+func (c *GoplsClient) DocumentSymbol(filename string) ([]DocumentSymbol, error) {
 	uri := c.documentURI(filename)
 	params := &lsp.DocumentSymbolParams{
 		TextDocument: lsp.TextDocumentIdentifier{
@@ -200,163 +280,61 @@ func (c *GoplsClient) DocumentSymbol(filename string) ([]Symbol, error) {
 	if err := c.Call("textDocument/documentSymbol", params, &result); err != nil {
 		return nil, err
 	}
-
-	var symbols []Symbol
-	for _, r := range result {
-		symbols = append(symbols, c.documentSymbolToSymbol(uri, r, filename))
+	b, err := os.ReadFile(filename)
+	if err != nil {
+		return nil, err
 	}
-	return symbols, nil
-}
+	if err := c.Call("textDocument/didOpen", lsp.DidOpenTextDocumentParams{
+		TextDocument: lsp.TextDocumentItem{
+			URI:        uri,
+			LanguageID: "go",
+			Version:    1,
+			Text:       string(b),
+		},
+	}, &struct{}{}); err != nil {
+		return nil, err
+	}
 
-// Read reads from gopls until candidate is found and sent on respChan.
-func (c *GoplsClient) Read(ctx context.Context, candidate uint64, respChan chan<- response) error {
-	done := make(chan bool)
-	var wg errgroup.Group
-
-	wg.Go(func() error {
-		for {
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			default:
-				buff := make([]byte, 16)
-				_, err := io.ReadFull(c.conn, buff)
-				if err != nil {
-					return err
-				}
-
-				cl := make([]byte, 0, 2)
-				buff = buff[:1]
-				for {
-					_, err := io.ReadFull(c.conn, buff)
-					if err != nil {
-						return err
-					}
-					if buff[0] == '\r' {
-						break
-					}
-					cl = append(cl, buff[0])
-				}
-
-				// Consume the \n\r\n
-				buff = buff[:3]
-				_, err = io.ReadFull(c.conn, buff)
-				if err != nil {
-					return err
-				}
-
-				contentLength, err := strconv.Atoi(string(cl))
-				if err != nil {
-					return err
-				}
-
-				buff = make([]byte, contentLength)
-				_, err = io.ReadFull(c.conn, buff)
-				if err != nil {
-					return err
-				}
-
-				var resp response
-				if err := json.Unmarshal(buff, &resp); err != nil {
-					return err
-				}
-
-				// gopls sends a lot of chatter with ID=0 (notifications meant for the editor).
-				// We need to ignore those.
-				if resp.ID == candidate {
-					close(done)
-					respChan <- resp
-					return nil
-				}
-			}
-		}
-	})
-
-	wg.Go(func() error {
-		for {
-			select {
-			case <-done:
-				return nil
-			case <-ctx.Done():
-				return c.conn.Close()
-			}
-		}
-	})
-
-	return wg.Wait()
+	return result, nil
 }
 
 // Write writes a request to gopls using the format specified by:
 // https://github.com/Microsoft/language-server-protocol/blob/gh-pages/_specifications/specification-3-14.md#text-documents
-func (c *GoplsClient) Write(r request) error {
+func (c *GoplsClient) Write(r lsp.Request) error {
 	b, err := json.Marshal(r)
 	if err != nil {
-		return err
+		return errors.Wrap(err, "marshal")
 	}
 
 	if _, err = fmt.Fprintf(c.conn, "Content-Length: %d\r\n\r\n", len(b)); err != nil {
-		return err
+		return errors.Wrap(err, "write content-length")
 	}
 
 	_, err = c.conn.Write(b)
-	return err
+	return errors.Wrap(err, "write")
 }
 
 func (c *GoplsClient) Initialize(params *lsp.InitializeParams) (*lsp.InitializeResult, error) {
 	var result lsp.InitializeResult
-
 	if err := c.Call("initialize", params, &result); err != nil {
-		return nil, err
+		return nil, errors.Wrap(err, "initialize")
 	}
 	return &result, nil
 }
 
 func (c *GoplsClient) Initialized() error {
-	return c.Call("initialized", &InitializedParams{}, nil)
-}
-
-func (c *GoplsClient) documentSymbolToSymbol(uri lsp.DocumentURI, ds DocumentSymbol, filename string) Symbol {
-	s := Symbol{
-		Name:     ds.Name,
-		Kind:     ds.Kind,
-		Filename: filename,
-		Location: lsp.Location{
-			URI:   uri,
-			Range: ds.SelectionRange,
-		},
-		Children: make([]Symbol, 0, len(ds.Children)),
-	}
-	for _, d := range ds.Children {
-		s.Children = append(s.Children, c.documentSymbolToSymbol(uri, d, filename))
-	}
-	return s
-}
-
-func (c *GoplsClient) documentURI(filename string) lsp.DocumentURI {
-	filename = filepath.ToSlash(filename)
-	if filepath.IsAbs(filename) {
-		return lsp.DocumentURI("file://" + filename)
-	}
-	return lsp.DocumentURI("file://" + filepath.Join(c.workspaceDir, filename))
+	return c.Call("initialized", &lsp.InitializedParams{}, nil)
 }
 
 type Symbol struct {
-	Name     string
-	Kind     lsp.SymbolKind
-	Filename string // TODO: remove, get from location?
-	Location lsp.Location
-	Children []Symbol
+	DocumentSymbol
+	URI lsp.URI
 }
 
-type request struct {
-	RPCVersion string      `json:"jsonrpc"`
-	ID         lsp.ID      `json:"id"`
-	Method     string      `json:"method"`
-	Params     interface{} `json:"params"`
-}
-
-type response struct {
-	RPCVersion string          `json:"jsonrpc"`
-	ID         uint64          `json:"id"`
-	Result     json.RawMessage `json:"result"`
+func (c *GoplsClient) documentURI(filename string) lsp.URI {
+	filename = filepath.ToSlash(filename)
+	if filepath.IsAbs(filename) {
+		return lsp.URI("file://" + filename)
+	}
+	return lsp.URI("file://" + filepath.Join(c.workspaceDir, filename))
 }
